@@ -16,9 +16,7 @@ import traceback
 import uuid
 
 from utils.constants import VARIABLE_MAP, SHORT_NAME_MAP
-from utils.helpers import (clear_prediction_results, get_time_dim_name, convert_time_array_to_local_timezone, 
-                          format_datetime_with_timezone, apply_temperature_conversion, get_temperature_display_unit,
-                          update_dataset_temperature_units, categorize_nc_files)
+from utils.helpers import clear_prediction_results, get_time_dim_name, convert_time_array_to_local_timezone, format_datetime_with_timezone
 from utils.netcdf_utils import save_prediction_to_netcdf
 from ml.models import (
     train_and_predict_rf, 
@@ -450,69 +448,20 @@ def render_prediction_tab():
         st.warning("No NetCDF files found. Please download a data file from the 'Data Fetching' tab.")
         return
 
-    # Categorize files for better organization
-    categorized_files = categorize_nc_files(all_nc_files_list, database_path)
-    
-    # Create hierarchical categorized options
-    file_options = ["Select a file"]
-    
-    # Add Point Files section
-    if categorized_files['Point']['Actual'] or categorized_files['Point']['Prediction']:
-        file_options.append("📍 POINT FILES")
-        file_options.append("─" * 50)  # Separator line
-        
-        if categorized_files['Point']['Actual']:
-            file_options.append("    ✓ Actual:")
-            for file in sorted(categorized_files['Point']['Actual']):
-                file_options.append(f"      └─ {file}")
-        
-        if categorized_files['Point']['Prediction']:
-            file_options.append("    🔮 Predicted:")
-            for file in sorted(categorized_files['Point']['Prediction']):
-                file_options.append(f"      └─ {file}")
-        
-        # Add separator if spatial files exist
-        if categorized_files['Spatial']['Actual'] or categorized_files['Spatial']['Prediction']:
-            file_options.append("─" * 50)  # Separator line
-    
-    # Add Spatial Files section
-    if categorized_files['Spatial']['Actual'] or categorized_files['Spatial']['Prediction']:
-        file_options.append("🗺️ SPATIAL FILES")
-        file_options.append("─" * 50)  # Separator line
-        
-        if categorized_files['Spatial']['Actual']:
-            file_options.append("    ✓ Actual:")
-            for file in sorted(categorized_files['Spatial']['Actual']):
-                file_options.append(f"      └─ {file}")
-        
-        if categorized_files['Spatial']['Prediction']:
-            file_options.append("    🔮 Predicted:")
-            for file in sorted(categorized_files['Spatial']['Prediction']):
-                file_options.append(f"      └─ {file}")
+    all_nc_files_dict = { f"File: {os.path.basename(f)}": f for f in all_nc_files_list }
+    options = ["Select a file"] + list(all_nc_files_dict.keys())
 
     selected_pred_key = st.selectbox(
         "Select a data file for prediction",
-        options=file_options,
+        options=options,
         index=0,
         key="prediction_file_selector",
         on_change=clear_prediction_results
     )
     
-    # Extract actual filename from hierarchical selection
-    actual_filename = None
     if selected_pred_key and selected_pred_key != "Select a file":
-        # Skip separator lines, headers, and subcategory labels
-        if (selected_pred_key.startswith("─") or 
-            selected_pred_key.startswith("📍 POINT FILES") or 
-            selected_pred_key.startswith("🗺️ SPATIAL FILES") or
-            selected_pred_key.strip().endswith("Actual:") or
-            selected_pred_key.strip().endswith("Predicted:")):
-            st.info("Please select a file from the dropdown menu.")
-        elif selected_pred_key.startswith("      └─ "):
-            actual_filename = selected_pred_key.replace("      └─ ", "")
-    
-    if actual_filename:
-        file_path = os.path.join(database_path, actual_filename)
+        file_name = all_nc_files_dict[selected_pred_key]
+        file_path = os.path.join(database_path, file_name)
         
         # --- Variable Selection ---
         try:
@@ -1340,13 +1289,7 @@ def render_prediction_tab():
                 # Get variable info for proper labeling
                 variable_info = SHORT_NAME_MAP.get(results['target_variable'], {})
                 variable_full_name = variable_info.get('name', results['target_variable'])
-                
-                # Get appropriate unit for display (temperature converted units)
-                display_unit = get_temperature_display_unit(results['target_variable'])
-                if display_unit is None:
-                    variable_units = variable_info.get('units', 'units')
-                else:
-                    variable_units = display_unit                  # Side-by-side comparison maps with time slider
+                variable_units = variable_info.get('units', 'units')                  # Side-by-side comparison maps with time slider
                 st.subheader("Spatial Field Comparison")
                 
                 # Get the spatial data arrays (now with all time slices)
@@ -1392,10 +1335,6 @@ def render_prediction_tab():
                         actual = actual_all_times.isel({time_dim: time_index})
                         predicted = predicted_all_times.isel({time_dim: time_index})
                         
-                        # Apply temperature conversion if this is a temperature variable
-                        actual = apply_temperature_conversion(actual, results['target_variable'])
-                        predicted = apply_temperature_conversion(predicted, results['target_variable'])
-                        
                         # Show status information
                         if time_index < n_actual_times:
                             st.info(f"🕒 **Showing results for:** {time_options[time_index]} [ACTUAL DATA]")
@@ -1405,10 +1344,6 @@ def render_prediction_tab():
                         # Single time slice
                         actual = actual_all_times.squeeze() if actual_all_times.values.ndim > 2 else actual_all_times
                         predicted = predicted_all_times.squeeze() if predicted_all_times.values.ndim > 2 else predicted_all_times
-                    
-                    # Apply temperature conversion if this is a temperature variable
-                    actual = apply_temperature_conversion(actual, results['target_variable'])
-                    predicted = apply_temperature_conversion(predicted, results['target_variable'])
                     
                     # Create side-by-side maps
                     from plotly.subplots import make_subplots

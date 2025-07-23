@@ -12,7 +12,7 @@ from tabs.file_inspection import render_file_inspection_tab
 from tabs.visualization import render_visualization_tab
 from tabs.report import render_report_tab
 from tabs.prediction import render_prediction_tab
-from utils.constants import TIMEZONE_OPTIONS, DEFAULT_TIMEZONE_OFFSET, TEMPERATURE_UNITS, DEFAULT_TEMPERATURE_UNIT
+from utils.constants import TIMEZONE_OPTIONS, DEFAULT_TIMEZONE_OFFSET
 
 # Configure Streamlit page
 st.set_page_config(
@@ -36,9 +36,6 @@ if 'selection_mode' not in st.session_state:
 # Initialize timezone setting
 if 'timezone_offset' not in st.session_state:
     st.session_state.timezone_offset = DEFAULT_TIMEZONE_OFFSET
-# Initialize temperature unit setting
-if 'temperature_unit' not in st.session_state:
-    st.session_state.temperature_unit = DEFAULT_TEMPERATURE_UNIT
 
 def main():
     """Main dashboard application."""
@@ -64,32 +61,14 @@ def main():
             "🕒 Time Zone Display",
             options=timezone_options,
             index=default_index,
-            help="Choose the timezone for displaying time data. All ERA5 data is originally in UTC.",
-            key="timezone_selector"  # Use a stable key
+            help="Choose the timezone for displaying time data. All ERA5 data is originally in UTC."
         )
         
-        # Update session state when timezone changes (reactive, no rerun)
-        st.session_state.timezone_offset = TIMEZONE_OPTIONS[selected_timezone]
-        
-        # Temperature Unit Configuration
-        temperature_options = list(TEMPERATURE_UNITS.keys())
-        current_temp_unit = st.session_state.temperature_unit
-        
-        if current_temp_unit in temperature_options:
-            default_temp_index = temperature_options.index(current_temp_unit)
-        else:
-            default_temp_index = temperature_options.index(DEFAULT_TEMPERATURE_UNIT)
-        
-        selected_temp_unit = st.selectbox(
-            "🌡️ Temperature Unit",
-            options=temperature_options,
-            index=default_temp_index,
-            help="Choose the temperature unit for displaying temperature data throughout the dashboard. Original .nc files remain unchanged.",
-            key="temp_unit_selector"  # Use a stable key
-        )
-        
-        # Update session state when temperature unit changes (reactive, no rerun)
-        st.session_state.temperature_unit = selected_temp_unit
+        # Update session state when timezone changes
+        new_offset = TIMEZONE_OPTIONS[selected_timezone]
+        if new_offset != st.session_state.timezone_offset:
+            st.session_state.timezone_offset = new_offset
+            st.rerun()  # Refresh to apply timezone change
         
         st.markdown("---")
     

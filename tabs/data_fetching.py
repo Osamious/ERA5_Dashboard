@@ -3,16 +3,10 @@ Data Fetching tab for the ERA5 Dashboard.
 """
 
 import streamlit as st
+import cdsapi
 import xarray as xr
 import os
 import pprint
-
-# Import cdsapi with error handling
-try:
-    import cdsapi
-    CDSAPI_AVAILABLE = True
-except ImportError:
-    CDSAPI_AVAILABLE = False
 
 from utils.constants import VARIABLE_MAP, SHORT_NAME_MAP
 from utils.helpers import st_checkbox_grid
@@ -20,12 +14,6 @@ from utils.helpers import st_checkbox_grid
 def render_data_fetching_tab():
     """Renders the Data Fetching tab content."""
     st.header("Download ERA5 Data")
-    
-    if not CDSAPI_AVAILABLE:
-        st.error("⚠️ **CDS API not available**")
-        st.info("The `cdsapi` package is required for downloading data. Please install it using: `pip install cdsapi`")
-        st.info("You can still use other tabs to analyze existing data files in the database folder.")
-        return
     
     st.info("Use this tab to download new ERA5 data. Downloaded files will be saved to the 'database' folder and can be visualized in the 'Visualization' tab.")
     
@@ -83,29 +71,21 @@ def render_data_fetching_tab():
     )    # --- Single Point Selection UI ---
     if st.session_state.selection_mode == "Single Point":
         # Import folium only when needed for map functionality
-        try:
-            import folium
-            from streamlit_folium import st_folium
-            FOLIUM_AVAILABLE = True
-        except ImportError:
-            FOLIUM_AVAILABLE = False
+        import folium
+        from streamlit_folium import st_folium
         
-        if FOLIUM_AVAILABLE:
-            st.markdown("**Select a single point by clicking the map or entering coordinates:**")
-            
-            # Create a map centered on the current coordinates
-            m_point = folium.Map(location=[st.session_state.latitude, st.session_state.longitude], zoom_start=4)
-            folium.Marker([st.session_state.latitude, st.session_state.longitude], popup="Selected Location").add_to(m_point)
-            map_data_point = st_folium(m_point, width=700, height=300)
+        st.markdown("**Select a single point by clicking the map or entering coordinates:**")
+        
+        # Create a map centered on the current coordinates
+        m_point = folium.Map(location=[st.session_state.latitude, st.session_state.longitude], zoom_start=4)
+        folium.Marker([st.session_state.latitude, st.session_state.longitude], popup="Selected Location").add_to(m_point)
+        map_data_point = st_folium(m_point, width=700, height=300)
 
-            # Update coordinates based on map click
-            if map_data_point and map_data_point['last_clicked']:
-                st.session_state.latitude = map_data_point['last_clicked']['lat']
-                st.session_state.longitude = map_data_point['last_clicked']['lng']
-                st.rerun()
-        else:
-            st.warning("⚠️ Interactive map not available. Folium package not installed.")
-            st.info("You can still enter coordinates manually below.")
+        # Update coordinates based on map click
+        if map_data_point and map_data_point['last_clicked']:
+            st.session_state.latitude = map_data_point['last_clicked']['lat']
+            st.session_state.longitude = map_data_point['last_clicked']['lng']
+            st.rerun()
 
         # Display and allow manual editing of coordinates
         st.markdown("**Manual Coordinate Entry:**")

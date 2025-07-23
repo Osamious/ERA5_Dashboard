@@ -10,10 +10,7 @@ import pandas as pd
 import xarray as xr
 
 from utils.constants import SHORT_NAME_MAP
-from utils.helpers import (get_time_dim_name, convert_time_array_to_local_timezone, 
-                          format_datetime_with_timezone, apply_temperature_conversion, 
-                          get_temperature_display_unit, format_temperature_label,
-                          update_dataset_temperature_units, categorize_nc_files)
+from utils.helpers import get_time_dim_name, convert_time_array_to_local_timezone, format_datetime_with_timezone
 
 # --- Helper functions for spatial plotting ---
 def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, quiver=False, 
@@ -34,9 +31,6 @@ def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, qui
     # Plot Contour with fixed scale
     if contour_var and contour_var != "None":
         data_to_plot = ds[contour_var].sel({time_dim: time_to_plot})
-        
-        # Apply temperature conversion if this is a temperature variable
-        data_to_plot = apply_temperature_conversion(data_to_plot, contour_var)
         
         # Ensure data is 2D for plotting by removing any singleton dimensions
         # and handling the case where we might have extra dimensions
@@ -70,14 +64,7 @@ def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, qui
         var_info = SHORT_NAME_MAP.get(contour_var, {})
         # Calculate fixed scale based on entire dataset min/max
         full_data = ds[contour_var]
-        # Apply temperature conversion to full data for proper scaling
-        full_data = apply_temperature_conversion(full_data, contour_var)
         vmin, vmax = full_data.min().item(), full_data.max().item()
-        
-        # Get appropriate unit label for display
-        display_unit = get_temperature_display_unit(contour_var)
-        if display_unit is None:
-            display_unit = var_info.get('units', 'N/A')
         
         # Create contour levels
         if isinstance(contour_levels, int):
@@ -89,7 +76,7 @@ def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, qui
             contour = ax.contourf(lon, lat, data_to_plot, transform=ccrs.PlateCarree(), 
                                 cmap=colormap, levels=levels, vmin=vmin, vmax=vmax, extend='both')
             plt.colorbar(contour, ax=ax, shrink=0.7, pad=0.02, 
-                        label=f"{var_info.get('name', contour_var)} ({display_unit})")
+                        label=f"{var_info.get('name', contour_var)} ({var_info.get('units', 'N/A')})")
         elif contour_type == "lines":
             contour = ax.contour(lon, lat, data_to_plot, transform=ccrs.PlateCarree(), 
                                levels=levels, colors='black', linewidths=1.0)
@@ -98,7 +85,7 @@ def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, qui
             cbar_contour = ax.contourf(lon, lat, data_to_plot, transform=ccrs.PlateCarree(), 
                                      cmap=colormap, levels=levels, vmin=vmin, vmax=vmax, alpha=0.3)
             plt.colorbar(cbar_contour, ax=ax, shrink=0.7, pad=0.02, 
-                        label=f"{var_info.get('name', contour_var)} ({display_unit})")
+                        label=f"{var_info.get('name', contour_var)} ({var_info.get('units', 'N/A')})")
         elif contour_type == "both":
             # Filled contours with line overlays
             contour_filled = ax.contourf(lon, lat, data_to_plot, transform=ccrs.PlateCarree(), 
@@ -107,7 +94,7 @@ def plot_spatial_map(ds, time_dim, lon, lat, time_to_plot, contour_var=None, qui
                                      levels=levels, colors='black', linewidths=0.5, alpha=0.7)
             ax.clabel(contour_lines, inline=True, fontsize=8, fmt='%.1f')
             plt.colorbar(contour_filled, ax=ax, shrink=0.7, pad=0.02, 
-                        label=f"{var_info.get('name', contour_var)} ({display_unit})")
+                        label=f"{var_info.get('name', contour_var)} ({var_info.get('units', 'N/A')})")
 
     # Plot Quiver with enhanced wind speed visualization
     if quiver and 'u10' in ds.data_vars and 'v10' in ds.data_vars:
@@ -183,20 +170,10 @@ def plot_3d_surface(ds, time_dim, lon, lat, time_to_plot, contour_var):
                 f"Dimensions: {data_3d.dims}")
         return None
         
-    # Apply temperature conversion if this is a temperature variable
-    data_3d = apply_temperature_conversion(data_3d, contour_var)
-    
     var_info = SHORT_NAME_MAP.get(contour_var, {})
     # Calculate fixed scale based on entire dataset min/max
     full_data = ds[contour_var]
-    # Apply temperature conversion to full data for proper scaling
-    full_data = apply_temperature_conversion(full_data, contour_var)
     cmin, cmax = full_data.min().item(), full_data.max().item()
-    
-    # Get appropriate unit label for display
-    display_unit = get_temperature_display_unit(contour_var)
-    if display_unit is None:
-        display_unit = var_info.get('units', 'N/A')
     
     fig = go.Figure(data=[go.Surface(z=data_3d.values, x=lon, y=lat, colorscale='jet',
                                    cmin=cmin, cmax=cmax)])
@@ -205,7 +182,7 @@ def plot_3d_surface(ds, time_dim, lon, lat, time_to_plot, contour_var):
         scene={
             'xaxis_title': 'Longitude',
             'yaxis_title': 'Latitude',
-            'zaxis_title': f"{var_info.get('name', contour_var)} ({display_unit})",
+            'zaxis_title': f"{var_info.get('name', contour_var)} ({var_info.get('units', 'N/A')})",
             'zaxis': {'range': [cmin, cmax]}  # Fixed Z-axis range
         },
         height=700
@@ -216,9 +193,6 @@ def plot_interactive_contour(ds, time_dim, lon, lat, time_to_plot, contour_var,
                            contour_levels=20, colormap="RdYlBu"):
     """Create an interactive Plotly contour plot."""
     data_to_plot = ds[contour_var].sel({time_dim: time_to_plot})
-    
-    # Apply temperature conversion if this is a temperature variable
-    data_to_plot = apply_temperature_conversion(data_to_plot, contour_var)
     
     # Ensure data is 2D for plotting by removing any singleton dimensions
     # and handling the case where we might have extra dimensions
@@ -253,14 +227,7 @@ def plot_interactive_contour(ds, time_dim, lon, lat, time_to_plot, contour_var,
     
     # Calculate fixed scale based on entire dataset min/max
     full_data = ds[contour_var]
-    # Apply temperature conversion to full data for proper scaling
-    full_data = apply_temperature_conversion(full_data, contour_var)
     zmin, zmax = full_data.min().item(), full_data.max().item()
-    
-    # Get appropriate unit label for display
-    display_unit = get_temperature_display_unit(contour_var)
-    if display_unit is None:
-        display_unit = var_info.get('units', 'N/A')
     
     # Create mesh grids for plotting
     lon_mesh, lat_mesh = np.meshgrid(lon, lat)
@@ -281,11 +248,11 @@ def plot_interactive_contour(ds, time_dim, lon, lat, time_to_plot, contour_var,
             labelfont=dict(size=10, color="black")
         ),
         colorbar=dict(
-            title=f"{var_info.get('name', contour_var)}<br>({display_unit})"
+            title=f"{var_info.get('name', contour_var)}<br>({var_info.get('units', 'N/A')}"
         ),
         hovertemplate='<b>Longitude</b>: %{x:.2f}°<br>' +
                       '<b>Latitude</b>: %{y:.2f}°<br>' +
-                      '<b>Value</b>: %{z:.2f} ' + display_unit +
+                      '<b>Value</b>: %{z:.2f} ' + var_info.get('units', '') +
                       '<extra></extra>'
     ))
     
@@ -528,70 +495,13 @@ def render_visualization_tab():
         st.warning("No NetCDF files found in the database folder. Please download some data first in the 'Data Fetching' tab.")
         return
     
-    # Categorize files
-    categorized_files = categorize_nc_files(nc_files, database_path)
-    
-    st.info("Select one or multiple files from your database to visualize. Files are organized by type and source.")
-    
-    # Create a hierarchical list with main categories and subcategories
-    file_options = []
-    
-    # Add Point Files section
-    if categorized_files['Point']['Actual'] or categorized_files['Point']['Prediction']:
-        file_options.append("📍 POINT FILES")
-        file_options.append("─" * 50)  # Separator line
-        
-        if categorized_files['Point']['Actual']:
-            file_options.append("    ✓ Actual:")
-            for file in sorted(categorized_files['Point']['Actual']):
-                file_options.append(f"      └─ {file}")
-        
-        if categorized_files['Point']['Prediction']:
-            file_options.append("    🔮 Predicted:")
-            for file in sorted(categorized_files['Point']['Prediction']):
-                file_options.append(f"      └─ {file}")
-        
-        # Add separator if spatial files exist
-        if categorized_files['Spatial']['Actual'] or categorized_files['Spatial']['Prediction']:
-            file_options.append("─" * 50)  # Separator line
-    
-    # Add Spatial Files section
-    if categorized_files['Spatial']['Actual'] or categorized_files['Spatial']['Prediction']:
-        file_options.append("🗺️ SPATIAL FILES")
-        file_options.append("─" * 50)  # Separator line
-        
-        if categorized_files['Spatial']['Actual']:
-            file_options.append("    ✓ Actual:")
-            for file in sorted(categorized_files['Spatial']['Actual']):
-                file_options.append(f"      └─ {file}")
-        
-        if categorized_files['Spatial']['Prediction']:
-            file_options.append("    🔮 Predicted:")
-            for file in sorted(categorized_files['Spatial']['Prediction']):
-                file_options.append(f"      └─ {file}")
-    
-    selected_display_files = st.multiselect(
+    st.info("Select one or multiple files from your database to visualize.")
+    selected_files = st.multiselect(
         "Choose NetCDF file(s) to visualize",
-        options=file_options,
-        default=[],
+        nc_files,
         key="visualization_file_selector",
-        help="📍 Point files show time series data for specific locations. 🗺️ Spatial files show maps and contour plots. You can select multiple files to compare them."
+        help="You can select multiple files to compare them. Point data files will be shown as time series, area data as maps."
     )
-    
-    # Extract actual filenames from the display names (excluding separator lines and headers)
-    selected_files = []
-    for display_name in selected_display_files:
-        # Skip separator lines, headers, and subcategory labels
-        if (display_name.startswith("─") or 
-            display_name.startswith("📍 POINT FILES") or 
-            display_name.startswith("🗺️ SPATIAL FILES") or
-            display_name.strip().endswith("Actual:") or
-            display_name.strip().endswith("Predicted:")):
-            continue
-        # Extract filename from "      └─ filename" format
-        if display_name.startswith("      └─ "):
-            filename = display_name.replace("      └─ ", "")
-            selected_files.append(filename)
 
     if not selected_files:
         st.info("Please select at least one file to visualize.")
@@ -677,15 +587,8 @@ def render_visualization_tab():
                             if var_data.isnull().all():
                                 continue
 
-                            # Apply temperature conversion if this is a temperature variable
-                            var_data = apply_temperature_conversion(var_data, var_name)
-
                             var_info = SHORT_NAME_MAP.get(var_name, {})
-                            # Get appropriate unit for display
-                            display_unit = get_temperature_display_unit(var_name)
-                            if display_unit is None:
-                                display_unit = var_info.get('units', ds[var_name].attrs.get('units', ''))
-                            units = display_unit
+                            units = var_info.get('units', ds[var_name].attrs.get('units', ''))
                             long_name = var_info.get('name', var_name)
                             trace_name = f"{os.path.basename(file_path)}: {long_name}"
                             
@@ -785,11 +688,8 @@ def render_visualization_tab():
                             for var_name in vars_in_file:
                                 var_info = SHORT_NAME_MAP.get(var_name, {})
                                 long_name = var_info.get('name', var_name)
-                                # Get appropriate unit for display
-                                display_unit = get_temperature_display_unit(var_name)
-                                if display_unit is None:
-                                    display_unit = var_info.get('units', ds[var_name].attrs.get('units', ''))
-                                subplot_titles.append(f"{long_name} ({display_unit})")
+                                units = var_info.get('units', ds[var_name].attrs.get('units', ''))
+                                subplot_titles.append(f"{long_name} ({units})")
                             
                             fig_sub = make_subplots(
                                 rows=len(vars_in_file), cols=1,
@@ -803,15 +703,8 @@ def render_visualization_tab():
                                 if var_data.isnull().all():
                                     continue
                                 
-                                # Apply temperature conversion if this is a temperature variable
-                                var_data = apply_temperature_conversion(var_data, var_name)
-                                
                                 var_info = SHORT_NAME_MAP.get(var_name, {})
-                                # Get appropriate unit for display
-                                display_unit = get_temperature_display_unit(var_name)
-                                if display_unit is None:
-                                    display_unit = var_info.get('units', ds[var_name].attrs.get('units', ''))
-                                units = display_unit
+                                units = var_info.get('units', ds[var_name].attrs.get('units', ''))
                                 
                                 fig_sub.add_trace(
                                     go.Scatter(
