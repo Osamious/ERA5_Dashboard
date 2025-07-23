@@ -1,0 +1,13 @@
+streamlit
+cdsapi
+xarray
+plotly
+folium
+streamlit-folium
+pandas
+numpy
+matplotlib
+cartopy
+statsmodels
+tf-nightly
+scikit-learn

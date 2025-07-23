@@ -1,0 +1,90 @@
+# ERA5 Dashboard - Feature Roadmap
+
+This file contains the planned features and enhancements for the ERA5 Dashboard. All completed work and bug fixes are now documented in the `Patch Notes` file.
+
+## Features to add:
+
+### All:
+
+1- Figures are extremely large, they take up the screen space of the entire screen, let's minimize them
+
+2- Add documentation tab that documents all the features
+
+4- If tf nightly is unstable, revert to python 3.12 and get tensorflow
+
+5- ✅ COMPLETED: Hierarchical file categorization system - For browsing .nc files, files are now organized into:
+
+      📍 POINT FILES:
+            ✓ Actual
+            🔮 Predicted
+      ─────────────────────
+      🗺️ SPATIAL FILES:  
+           ✓ Actual
+           🔮 Predicted
+
+This helps users recognize file types when selecting them across ALL tabs: Visualization, File Inspection, Report, and Prediction tabs with clear visual hierarchy and separation lines.
+
+
+### Data Fetching:
+
+1- Add ability to concatanate/merge files together to overcome download limit from era5 database
+
+
+### Visualization:
+
+1- Make the time slider and entire map sizes such that both can be shown on the screen at the same time.
+
+2- Make time slider update the plot in real time or smooth animation
+
+3- For area files with mutiple variables, add ability to plot them superimposed on each other and toggle them on/off
+
+4- For spatial maps, add a short description for each spatial plot and what data it best represents in the contexet of this project.
+
+5- Range selector for spatial files: user will select a time range for the data in a spatial file, using this time range, the dashboard will calculate three things: maximum, minimum, and average value for each grid point and display 3 seperate plots to visualize each, plots will update as time range is changed. This feature is to help visualize how max,min, and average values change across time.
+
+
+### Report:
+
+1- ✅ COMPLETED: Time range selector for report analysis - Users can now select a specific time range within any NetCDF file for focused statistical analysis and reporting.
+
+2- ✅ COMPLETED: Variable selection for multi-variable files - Users can now choose which specific variables to analyze instead of processing all variables automatically, improving performance and focus.
+
+3- ✅ COMPLETED: Sub-region selection for spatial files - Users can now define a custom geographic bounding box to focus analysis on specific regions of interest, with coordinate validation, clipping, and interactive map drawing capabilities similar to the data fetching tab.
+
+4- Expand capabiltiy of report tab to write a few paragraphs on the analysis it makes, explaining the report, highlighting anything interesting, and draw conclusions/predictions.
+
+5- For files with multiple variabes, analyze them and draw/exclude connections, find patterns and reach conclusions
+
+6- Ability to read multiple files and use data from different files to draw/exclude connections, find patterns and reach conclusions
+
+
+### Prediction:
+
+1- ✅ COMPLETED: Replace IDW model with ConvLSTM for spatial prediction - ConvLSTM now implemented as base spatial model with proper spatio-temporal forecasting capabilities.
+
+2- Add suppport for more paramater optimization methods like grid search while keeping the old ones
+
+3- For files with multiple variables, add support to identify all variables, then add the option to predict each variable independetly or collectively. For independent prediction add checkbox for which variables I want to generate predictions, for collective, give me the option to select what variables I want to be included and linked together in the prediction, otherwise try to find the links and patterns between them automatically and note what you find at the end of the prediction in a nice summary
+
+4- Add advice description when auto-tune is enabled about what values to set for number of trials and time-out
+
+5- Add a description regarding the auto tune button: for each model, what parameter is being optimized
+
+6- rename auto-tune to paramtere optimization
+
+7- The main actual vs predicted plot has a problem with the y-axis, it doesn't use the simple variable name and shows no units.
+
+9- subsmapling for large grids maybe?
+
+### Didn't work:
+
+8- Loading bar when running auto tune to show progress of prediciotn and parameter optimization
+
+9- Add a timer that counts how long it took for the training to complete
+
+---
+
+### File types:
+- Dimension: Single Point, Area (Spatial)
+- Variables:  Single Variable, Multi-Variable
+- Nature: Actual, Predicted

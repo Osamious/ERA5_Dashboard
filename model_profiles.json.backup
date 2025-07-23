@@ -1,0 +1,53 @@
+{
+    "RandomForestRegressor": {
+        "0.898 R^2": {
+            "n_estimators_rf": 100,
+            "max_depth_rf": 10,
+            "min_samples_split_rf": 3,
+            "min_samples_leaf_rf": 2,
+            "criterion_rf": "squared_error",
+            "max_features_rf": "sqrt",
+            "bootstrap_rf": true,
+            "oob_score_rf": false
+        },
+        "AutoTune_RandomForestRegressor_20250622_1041": {
+            "n_estimators_rf": 205,
+            "max_depth_rf": 19,
+            "min_samples_split_rf": 20,
+            "min_samples_leaf_rf": 8,
+            "max_features_rf": "sqrt",
+            "criterion_rf": "squared_error",
+            "bootstrap_rf": true,
+            "oob_score_rf": true
+        }
+    },
+    "GradientBoostingRegressor": {
+        "0.91 R^2": {
+            "n_estimators_gbr": 240,
+            "max_depth_gbr": 2,
+            "min_samples_split_gbr": 2,
+            "min_samples_leaf_gbr": 1,
+            "learning_rate_gbr": 0.22,
+            "subsample_gbr": 0.6,
+            "loss_gbr": "absolute_error"
+        },
+        "TestGBR_AutoTune_Debug": {
+            "n_estimators_gbr": 282,
+            "max_depth_gbr": 3,
+            "min_samples_split_gbr": 13,
+            "min_samples_leaf_gbr": 4,
+            "learning_rate_gbr": 0.036009061044009145,
+            "subsample_gbr": 0.9352131782384753,
+            "loss_gbr": "absolute_error"
+        },
+        "TestSave_Function": {
+            "n_estimators_gbr": 150,
+            "max_depth_gbr": 5,
+            "min_samples_split_gbr": 4,
+            "min_samples_leaf_gbr": 2,
+            "learning_rate_gbr": 0.1,
+            "subsample_gbr": 0.8,
+            "loss_gbr": "absolute_error"
+        }
+    }
+}

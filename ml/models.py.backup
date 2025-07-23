@@ -1,0 +1,1272 @@
+"""
+Machine Learning models and prediction functions for the ERA5 Dashboard.
+"""
+
+import pandas as pd
+import numpy as np
+import xarray as xr
+from sklearn.model_selection import train_test_split, learning_curve
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.inspection import permutation_importance
+
+from utils.helpers import get_time_dim_name
+
+def _prepare_prediction_data(file_path, target_variable):
+    """Loads data, performs feature engineering, and splits into X and y."""
+    with xr.open_dataset(file_path) as ds:
+        time_dim = get_time_dim_name(ds)
+        df = ds.to_dataframe().reset_index()
+        all_vars = list(ds.data_vars.keys())
+        lat = ds.latitude.item() if 'latitude' in ds.coords else None
+        lon = ds.longitude.item() if 'longitude' in ds.coords else None
+
+    time_col = pd.to_datetime(df[time_dim])
+    df['time_numeric'] = (time_col - time_col.min()).dt.total_seconds()
+    df['month'] = time_col.dt.month
+    df['day'] = time_col.dt.day
+    df['hour'] = time_col.dt.hour
+    df['dayofweek'] = time_col.dt.dayofweek
+    df['dayofyear'] = time_col.dt.dayofyear
+    df['quarter'] = time_col.dt.quarter
+    df['weekofyear'] = time_col.dt.isocalendar().week.astype(int)
+
+    features = ['time_numeric', 'month', 'day', 'hour', 'dayofweek', 'dayofyear', 'quarter', 'weekofyear']
+    
+    if len(all_vars) > 1:
+        other_vars = [v for v in all_vars if v != target_variable]
+        features.extend(other_vars)
+
+    X = df[features]
+    y = df[target_variable]
+
+    return X, y, df, time_dim, features, all_vars, lat, lon, time_col
+
+def _generate_future_features(df, time_dim, time_col, forecast_horizon, features, all_vars, target_variable):
+    """Generates a DataFrame with features for future predictions."""
+    last_time = pd.to_datetime(df[time_dim].max())
+    time_step_seconds = df['time_numeric'].diff().mean()
+
+    if pd.isna(time_step_seconds) or time_step_seconds == 0:
+        try:
+            freq = pd.infer_freq(df[time_dim])
+            time_step_seconds = pd.to_timedelta(freq).total_seconds()
+            if time_step_seconds is None or time_step_seconds == 0: 
+                raise ValueError
+        except (TypeError, ValueError):
+            time_step_seconds = 3600  # Default to 1 hour
+
+    future_datetimes = pd.to_datetime([last_time + pd.to_timedelta(i * time_step_seconds, unit='s') for i in range(1, forecast_horizon + 1)])
+    
+    future_df = pd.DataFrame(index=future_datetimes)
+    future_df['time_numeric'] = (future_df.index - time_col.min()).total_seconds()
+    future_df['month'] = future_df.index.month
+    future_df['day'] = future_df.index.day
+    future_df['hour'] = future_df.index.hour
+    future_df['dayofweek'] = future_df.index.dayofweek
+    future_df['dayofyear'] = future_df.index.dayofyear
+    future_df['quarter'] = future_df.index.quarter
+    future_df['weekofyear'] = future_df.index.isocalendar().week.astype(int)
+
+    if len(all_vars) > 1:
+        other_vars = [v for v in all_vars if v != target_variable]
+        for var in other_vars:
+            # Use the last known value to project forward
+            future_df[var] = df[var].iloc[-1]
+
+    return future_df[features], future_datetimes
+
+def train_and_predict_rf(file_path, target_variable, n_estimators, max_depth, min_samples_split, 
+                        min_samples_leaf, forecast_horizon, max_features, criterion, bootstrap, oob_score):
+    """
+    Trains a RandomForestRegressor model and generates future predictions.
+    """
+    # 1. Load and Prepare Data
+    X, y, df, time_dim, features, all_vars, lat, lon, time_col = _prepare_prediction_data(file_path, target_variable)
+
+    # Split data for evaluation
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+
+    # 2. Train Model for Evaluation
+    eval_model = RandomForestRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        criterion=criterion,
+        bootstrap=bootstrap,
+        oob_score=oob_score,
+        random_state=42,
+        n_jobs=-1
+    )
+    eval_model.fit(X_train, y_train)
+
+    # 3. Evaluate on Test Set
+    oob_score_value = eval_model.oob_score_ if oob_score and bootstrap else None
+    y_pred_test = eval_model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    mae = mean_absolute_error(y_test, y_pred_test)
+    r2 = r2_score(y_test, y_pred_test)
+
+    # --- Permutation Importance ---
+    perm_importance_result = permutation_importance(
+        eval_model, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1
+    )
+
+    # 4. Retrain on Full Data for Final Forecast
+    final_model = RandomForestRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        criterion=criterion,
+        bootstrap=bootstrap,
+        oob_score=False,  # OOB score is not needed for the final forecasting model
+        random_state=42,
+        n_jobs=-1
+    )
+    final_model.fit(X, y)  # Retrain on the entire dataset
+
+    # 5. Generate Learning Curves
+    train_sizes, train_scores, validation_scores = learning_curve(
+        estimator=eval_model,
+        X=X, y=y,
+        train_sizes=[0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
+        cv=3,  # 3-fold cross-validation
+        scoring='neg_mean_squared_error',
+        n_jobs=-1,
+        shuffle=False  # Important for time series
+    )
+
+    # 6. Generate Future Predictions
+    future_features, future_datetimes = _generate_future_features(
+        df, time_dim, time_col, forecast_horizon, features, all_vars, target_variable
+    )
+    y_pred_future = final_model.predict(future_features)
+
+    return {
+        "rmse": rmse, "mae": mae, "r2": r2, "oob_score": oob_score_value,
+        "y_pred_test": y_pred_test, "y_test": y_test,
+        "y_pred_future": y_pred_future,
+        "df": df, "time_dim": time_dim,
+        "future_datetimes": future_datetimes,
+        "latitude": lat,
+        "longitude": lon,
+        "target_variable": target_variable,
+        "model_name": "RandomForestRegressor",
+        "feature_importances": eval_model.feature_importances_,
+        "perm_importance": perm_importance_result,
+        "feature_names": features,
+        "learning_curve": {
+            "train_sizes": train_sizes,
+            "train_scores": train_scores,
+            "validation_scores": validation_scores
+        },
+        "model_params": {
+            'n_estimators': n_estimators, 'max_depth': max_depth, 'min_samples_split': min_samples_split,
+            'min_samples_leaf': min_samples_leaf, 'max_features': max_features, 'criterion': criterion,
+            'bootstrap': bootstrap, 'oob_score': oob_score
+        }
+    }
+
+def train_and_predict_gbr(file_path, target_variable, n_estimators, max_depth, min_samples_split, 
+                         min_samples_leaf, learning_rate, subsample, loss, forecast_horizon):
+    """
+    Trains a GradientBoostingRegressor model and generates future predictions.
+    """
+    # 1. Load and Prepare Data
+    X, y, df, time_dim, features, all_vars, lat, lon, time_col = _prepare_prediction_data(file_path, target_variable)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+
+    # 2. Train Model for Evaluation
+    eval_model = GradientBoostingRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        learning_rate=learning_rate,
+        subsample=subsample,
+        loss=loss,
+        random_state=42
+    )
+    eval_model.fit(X_train, y_train)
+
+    # 3. Evaluate on Test Set
+    y_pred_test = eval_model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    mae = mean_absolute_error(y_test, y_pred_test)
+    r2 = r2_score(y_test, y_pred_test)
+
+    # --- Permutation Importance ---
+    perm_importance_result = permutation_importance(
+        eval_model, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1
+    )
+
+    # 4. Retrain on Full Data for Final Forecast
+    final_model = GradientBoostingRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        learning_rate=learning_rate,
+        subsample=subsample,
+        loss=loss,
+        random_state=42
+    )
+    final_model.fit(X, y)
+
+    # 5. Generate Learning Curves
+    train_sizes, train_scores, validation_scores = learning_curve(
+        estimator=eval_model,
+        X=X, y=y,
+        train_sizes=[0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
+        cv=3,  # 3-fold cross-validation
+        scoring='neg_mean_squared_error',
+        n_jobs=-1,
+        shuffle=False  # Important for time series
+    )
+
+    # 6. Generate Future Predictions
+    future_features, future_datetimes = _generate_future_features(
+        df, time_dim, time_col, forecast_horizon, features, all_vars, target_variable
+    )
+    y_pred_future = final_model.predict(future_features)
+
+    return {
+        "rmse": rmse, "mae": mae, "r2": r2, "oob_score": None,
+        "y_pred_test": y_pred_test, "y_test": y_test,
+        "y_pred_future": y_pred_future,
+        "df": df, "time_dim": time_dim,
+        "future_datetimes": future_datetimes,
+        "latitude": lat,
+        "longitude": lon,
+        "target_variable": target_variable,
+        "model_name": "GradientBoostingRegressor",
+        "feature_importances": eval_model.feature_importances_,
+        "perm_importance": perm_importance_result,
+        "feature_names": features,
+        "learning_curve": {
+            "train_sizes": train_sizes,
+            "train_scores": train_scores,
+            "validation_scores": validation_scores
+        },
+        "model_params": {
+            'n_estimators': n_estimators, 'max_depth': max_depth, 'min_samples_split': min_samples_split,
+            'min_samples_leaf': min_samples_leaf, 'learning_rate': learning_rate, 'subsample': subsample,
+            'loss': loss
+        }
+    }
+
+
+def train_and_predict_idw_spatial(file_path, target_variable, power=2.0, min_neighbors=5, max_neighbors=20):
+    """
+    Perform spatial prediction using Inverse Distance Weighting (IDW).
+    
+    Args:
+        file_path: Path to the spatial NetCDF file
+        target_variable: Variable to predict
+        power: IDW power parameter (higher = more weight to closer points)
+        min_neighbors: Minimum number of neighbors for interpolation
+        max_neighbors: Maximum number of neighbors for interpolation
+        
+    Returns:
+        dict: Results containing spatial predictions and metrics
+    """
+    import scipy.spatial.distance as distance
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    
+    # Load spatial data
+    with xr.open_dataset(file_path) as ds:
+        # Get the target variable data
+        data_array = ds[target_variable]
+        
+        # Get the correct coordinate names
+        lat_name, lon_name = _get_spatial_coord_names(ds)
+        
+        # Check if we have lat/lon dimensions
+        if lat_name is None or lon_name is None:
+            raise ValueError(f"Spatial data must have latitude/longitude dimensions. Found: {list(ds.dims)}")
+        
+        # Check if this is actually spatial data (more than one grid point)
+        lat_size = len(ds[lat_name])
+        lon_size = len(ds[lon_name])
+        if lat_size == 1 and lon_size == 1:
+            raise ValueError(f"This appears to be single-point data (1x1 grid), not spatial data. Use time series models instead.")
+        
+        # Get coordinates
+        lats = ds[lat_name].values
+        lons = ds[lon_name].values
+        
+        # Create coordinate mesh
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+        
+        # Get the most recent time slice for prediction
+        time_dim = get_time_dim_name(ds)
+        if time_dim and len(ds[time_dim]) > 1:
+            # Use the last time step as "actual" and second-to-last for training
+            actual_data = data_array.isel({time_dim: -1})
+            training_data = data_array.isel({time_dim: -2})
+        else:
+            # If only one time step, split spatially for demonstration
+            actual_data = data_array.squeeze()
+            training_data = actual_data.copy()
+    
+    # Flatten spatial data
+    actual_flat = actual_data.values.flatten() if actual_data.values.ndim > 1 else actual_data.values
+    training_flat = training_data.values.flatten() if training_data.values.ndim > 1 else training_data.values
+    
+    # Create coordinate arrays
+    coords = np.column_stack([lat_grid.flatten(), lon_grid.flatten()])
+    
+    # Remove NaN values
+    valid_mask = ~np.isnan(training_flat)
+    valid_coords = coords[valid_mask]
+    valid_values = training_flat[valid_mask]
+    
+    if len(valid_values) < min_neighbors:
+        raise ValueError(f"Not enough valid data points ({len(valid_values)}) for IDW interpolation")
+    
+    # Perform proper IDW interpolation with leave-one-out validation
+    predicted_flat = np.full_like(actual_flat, np.nan)
+    
+    # For each point, predict it using OTHER points (leave-one-out approach)
+    for i in range(len(coords)):
+        if not valid_mask[i]:
+            # For invalid points, skip prediction
+            continue
+        
+        target_coord = coords[i:i+1]
+        
+        # Create training set by excluding the current point
+        current_point_idx = np.where((valid_coords == coords[i]).all(axis=1))[0]
+        if len(current_point_idx) > 0:
+            # Exclude current point from training data
+            training_mask = np.ones(len(valid_coords), dtype=bool)
+            training_mask[current_point_idx[0]] = False
+            
+            training_coords = valid_coords[training_mask]
+            training_values = valid_values[training_mask]
+        else:
+            # Fallback if point not found
+            training_coords = valid_coords
+            training_values = valid_values
+        
+        if len(training_coords) >= min_neighbors:
+            # Calculate distances to training points only
+            distances_to_training = distance.cdist(target_coord, training_coords)[0]
+            
+            # Avoid division by zero for coincident points
+            distances_to_training = np.where(distances_to_training == 0, 1e-10, distances_to_training)
+            
+            # Sort by distance and take closest neighbors
+            sorted_indices = np.argsort(distances_to_training)
+            n_neighbors = min(max_neighbors, len(training_coords))
+            n_neighbors = max(n_neighbors, min_neighbors)
+            
+            neighbor_indices = sorted_indices[:n_neighbors]
+            neighbor_distances = distances_to_training[neighbor_indices]
+            neighbor_values = training_values[neighbor_indices]
+            
+            # Calculate IDW weights
+            weights = 1.0 / (neighbor_distances ** power)
+            weights_sum = np.sum(weights)
+            
+            if weights_sum > 0:
+                predicted_flat[i] = np.sum(weights * neighbor_values) / weights_sum
+            else:
+                # Fallback to mean if all weights are zero
+                predicted_flat[i] = np.mean(neighbor_values)
+        else:
+            # Not enough neighbors, use mean of all available training values
+            predicted_flat[i] = np.mean(valid_values)
+    
+    # Reshape back to original spatial dimensions
+    original_shape = actual_data.values.shape
+    predicted_spatial = predicted_flat.reshape(original_shape)
+    
+    # Create xarray DataArrays for output
+    predicted_da = xr.DataArray(
+        predicted_spatial,
+        coords=actual_data.coords,
+        dims=actual_data.dims,
+        name=f"{target_variable}_predicted"
+    )
+    
+    # Calculate metrics on valid grid points only
+    # Create mask for valid (non-NaN) values in the original actual data
+    valid_mask = ~np.isnan(actual_flat)
+    actual_valid = actual_flat[valid_mask]
+    predicted_valid = predicted_flat[valid_mask]
+    
+    if len(actual_valid) > 0 and len(predicted_valid) > 0:
+        rmse = np.sqrt(mean_squared_error(actual_valid, predicted_valid))
+        mae = mean_absolute_error(actual_valid, predicted_valid)
+        r2 = r2_score(actual_valid, predicted_valid)
+    else:
+        rmse = mae = r2 = np.nan
+    
+    return {
+        "rmse": rmse,
+        "mae": mae, 
+        "r2": r2,
+        "actual_spatial": actual_data,
+        "predicted_spatial": predicted_da,
+        "target_variable": target_variable,
+        "model_name": "InverseDistanceWeighting",
+        "model_params": {
+            'power': power,
+            'min_neighbors': min_neighbors,
+            'max_neighbors': max_neighbors
+        },
+        "n_valid_points": len(valid_values),
+        "spatial_coverage": len(valid_values) / len(actual_flat.flatten())
+    }
+
+def train_and_predict_idw_spatial_all_times(file_path, target_variable, power=2.0, min_neighbors=5, max_neighbors=20, forecast_horizon=24):
+    """
+    Perform spatial prediction using Inverse Distance Weighting (IDW) for all time slices.
+    This function is designed to work with the time slider in the prediction tab.
+    
+    Args:
+        file_path: Path to the spatial NetCDF file
+        target_variable: Variable to predict
+        power: IDW power parameter (higher = more weight to closer points)
+        min_neighbors: Minimum number of neighbors for interpolation
+        max_neighbors: Maximum number of neighbors for interpolation
+        forecast_horizon: Number of future time steps to forecast
+    
+    Returns:
+        dict: Results containing spatial predictions for all time slices and metrics
+    """
+    import scipy.spatial.distance as distance
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    
+    # Load spatial data
+    with xr.open_dataset(file_path) as ds:
+        # Get the target variable data
+        data_array = ds[target_variable]
+        
+        # Get the correct coordinate names
+        lat_name, lon_name = _get_spatial_coord_names(ds)
+        
+        # Check if we have lat/lon dimensions
+        if lat_name is None or lon_name is None:
+            raise ValueError(f"Spatial data must have latitude/longitude dimensions. Found: {list(ds.dims)}")
+        
+        # Check if this is actually spatial data (more than one grid point)
+        lat_size = len(ds[lat_name])
+        lon_size = len(ds[lon_name])
+        if lat_size == 1 and lon_size == 1:
+            raise ValueError(f"This appears to be single-point data (1x1 grid), not spatial data. Use time series models instead.")
+        
+        # Get coordinates
+        lats = ds[lat_name].values
+        lons = ds[lon_name].values
+        
+        # Create coordinate mesh
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+        
+        # Get time dimension info
+        time_dim = get_time_dim_name(ds)
+        
+        if time_dim and len(ds[time_dim]) > 1:
+            # For multi-time data, process existing time steps and generate future forecasts
+            n_times = len(ds[time_dim])
+            
+            # Get time information for forecasting
+            times_available = ds[time_dim].values
+            
+            # Generate future time steps
+            time_step_seconds = pd.to_datetime(times_available).to_series().diff().dt.total_seconds().median()
+            if pd.isna(time_step_seconds) or time_step_seconds == 0:
+                time_step_seconds = 3600  # Default to 1 hour
+            
+            last_time = pd.to_datetime(times_available[-1])
+            future_times = [last_time + pd.to_timedelta(i * time_step_seconds, unit='s') 
+                          for i in range(1, forecast_horizon + 1)]
+            
+            # Combine existing and future times
+            all_times = list(times_available) + future_times
+            total_times = n_times + forecast_horizon
+            
+            # Process existing data and generate predictions
+            actual_all_times = data_array
+              # Create predicted data by applying proper IDW with spatial validation
+            # Use leave-one-out cross-validation approach for realistic predictions
+            predicted_all_times = []
+            
+            for t in range(total_times):
+                if t < n_times:
+                    # Process existing time steps
+                    time_slice = data_array.isel({time_dim: t})
+                    current_time = times_available[t]
+                else:
+                    # Generate future time steps using improved temporal forecasting
+                    current_time = future_times[t - n_times]
+                    future_steps = t - n_times + 1
+                    
+                    # Use a more sophisticated forecasting approach
+                    if n_times >= 24:  # If we have at least 24 time steps, try seasonal patterns
+                        time_slice = _generate_seasonal_forecast(data_array, current_time, times_available, future_steps)
+                    elif n_times >= 3:  # If we have at least 3 points, use damped trend
+                        time_slice = _generate_damped_trend_forecast(data_array, future_steps)
+                    else:
+                        # Fallback: use persistence (last known value with small random variation)
+                        last_slice = data_array.isel({time_dim: -1})
+                        # Add small cyclical variation instead of linear trend
+                        time_slice = _generate_persistence_forecast(last_slice, future_steps)
+                
+                # Proper IDW spatial prediction with hold-out validation
+                actual_flat = time_slice.values.flatten()
+                coords = np.column_stack([lat_grid.flatten(), lon_grid.flatten()])
+                
+                # Remove NaN values
+                valid_mask = ~np.isnan(actual_flat)
+                valid_coords = coords[valid_mask]
+                valid_values = actual_flat[valid_mask]
+                
+                if len(valid_values) >= min_neighbors:
+                    # Perform proper IDW interpolation with spatial hold-out
+                    predicted_flat = np.full_like(actual_flat, np.nan)
+                    
+                    # For each point, predict it using OTHER points (leave-one-out approach)
+                    for i in range(len(actual_flat)):
+                        if not valid_mask[i]:
+                            # For invalid points, skip prediction
+                            continue
+                        
+                        target_coord = coords[i:i+1]
+                        
+                        # Create training set by excluding the current point
+                        current_point_idx = np.where((valid_coords == coords[i]).all(axis=1))[0]
+                        if len(current_point_idx) > 0:
+                            # Exclude current point from training data
+                            training_mask = np.ones(len(valid_coords), dtype=bool)
+                            training_mask[current_point_idx[0]] = False
+                            
+                            training_coords = valid_coords[training_mask]
+                            training_values = valid_values[training_mask]
+                        else:
+                            # Fallback if point not found
+                            training_coords = valid_coords
+                            training_values = valid_values
+                        
+                        if len(training_coords) >= min_neighbors:
+                            # Calculate distances to training points only
+                            distances = distance.cdist(target_coord, training_coords)[0]
+                            
+                            # Get nearest neighbors from training set
+                            neighbor_indices = np.argsort(distances)[:max_neighbors]
+                            neighbor_distances = distances[neighbor_indices]
+                            neighbor_values = training_values[neighbor_indices]
+                            
+                            # Filter by minimum neighbors
+                            if len(neighbor_indices) >= min_neighbors:
+                                # Calculate IDW weights (avoid division by zero)
+                                weights = np.where(neighbor_distances == 0, 1e10, 1 / (neighbor_distances ** power))
+                                weights_sum = np.sum(weights)
+                                
+                                if weights_sum > 0:
+                                    predicted_flat[i] = np.sum(weights * neighbor_values) / weights_sum
+                                else:
+                                    predicted_flat[i] = np.mean(neighbor_values)
+                            else:
+                                predicted_flat[i] = np.mean(training_values)
+                        else:
+                            predicted_flat[i] = np.mean(valid_values)
+                
+                # Reshape back to spatial dimensions
+                predicted_spatial = predicted_flat.reshape(time_slice.values.shape)
+                
+                # Create coordinates for this time step
+                if t < n_times:
+                    # Use existing coordinates from the actual data
+                    predicted_da = xr.DataArray(
+                        predicted_spatial,
+                        coords=time_slice.coords,
+                        dims=time_slice.dims,
+                        name=f"{target_variable}_predicted"
+                    )
+                else:
+                    # Create coordinates for future time step (2D spatial data)
+                    coords_dict = {lat_name: lats, lon_name: lons}
+                    dims_list = [lat_name, lon_name]
+                    
+                    # Create the DataArray with spatial coordinates only
+                    spatial_da = xr.DataArray(
+                        predicted_spatial,
+                        coords=coords_dict,
+                        dims=dims_list,
+                        name=f"{target_variable}_predicted"
+                    )
+                    
+                    # Add the time coordinate to make it 3D
+                    predicted_da = spatial_da.expand_dims({time_dim: [current_time]})
+                
+                predicted_all_times.append(predicted_da)
+            
+            # Combine all predicted time slices
+            predicted_all_times = xr.concat(predicted_all_times, dim=time_dim, coords='minimal')
+            
+            # Create extended actual data that includes NaN for future times
+            # This allows the time slider to show future predictions
+            actual_data_list = []
+            for t in range(total_times):
+                if t < n_times:
+                    # Use existing actual data
+                    actual_slice = data_array.isel({time_dim: t})
+                    actual_data_list.append(actual_slice)
+                else:
+                    # Create NaN data for future times (no actual data available)
+                    future_time = future_times[t - n_times]
+                    nan_data = np.full_like(data_array.isel({time_dim: 0}).values, np.nan)
+                    
+                    # Create 2D spatial coordinates first
+                    coords_dict = {lat_name: lats, lon_name: lons}
+                    dims_list = [lat_name, lon_name]
+                    
+                    # Create the DataArray with spatial coordinates only
+                    spatial_da = xr.DataArray(
+                        nan_data,
+                        coords=coords_dict,
+                        dims=dims_list,
+                        name=target_variable
+                    )
+                    
+                    # Add the time coordinate to make it 3D
+                    actual_future_da = spatial_da.expand_dims({time_dim: [future_time]})
+                    actual_data_list.append(actual_future_da)
+            
+            # Combine actual data (existing + future NaN)
+            actual_all_times = xr.concat(actual_data_list, dim=time_dim, coords='minimal')
+            
+            # Create extended times array that includes future times for the time slider
+            extended_times = np.array(all_times)
+            
+        else:
+            # Single time slice - use the existing logic
+            actual_all_times = data_array.squeeze()
+            predicted_all_times = actual_all_times.copy()  # Simple fallback
+            extended_times = None
+        
+        # Calculate overall metrics using the last actual time slice (not forecast)
+        if time_dim and len(ds[time_dim]) > 1:
+            # Use the last actual data for metrics (not forecast data)
+            actual_last = data_array.isel({time_dim: -1})
+            predicted_last = predicted_all_times.isel({time_dim: n_times-1})  # Last actual prediction
+        else:
+            actual_last = actual_all_times
+            predicted_last = predicted_all_times
+        
+        actual_flat = actual_last.values.flatten()
+        predicted_flat = predicted_last.values.flatten()
+        
+        # Calculate metrics on valid grid points only
+        valid_mask = ~np.isnan(actual_flat)
+        actual_valid = actual_flat[valid_mask]
+        predicted_valid = predicted_flat[valid_mask]
+        
+        if len(actual_valid) > 0 and len(predicted_valid) > 0:
+            rmse = np.sqrt(mean_squared_error(actual_valid, predicted_valid))
+            mae = mean_absolute_error(actual_valid, predicted_valid)
+            r2 = r2_score(actual_valid, predicted_valid)
+        else:
+            rmse = mae = r2 = np.nan
+    
+    return {
+        "rmse": rmse,
+        "mae": mae, 
+        "r2": r2,
+        "actual_spatial_all_times": actual_all_times,
+        "predicted_spatial_all_times": predicted_all_times,
+        "target_variable": target_variable,
+        "model_name": "InverseDistanceWeighting",
+        "model_params": {
+            'power': power,
+            'min_neighbors': min_neighbors,
+            'max_neighbors': max_neighbors
+        },
+        "time_dim": time_dim,
+        "n_times": total_times if time_dim and len(ds[time_dim]) > 1 else 1,  # Include forecast times
+        "n_actual_times": len(ds[time_dim]) if time_dim else 1,  # Just actual times
+        "times_available": extended_times if extended_times is not None else (ds[time_dim].values if time_dim else None),  # Include forecast times
+        "forecast_horizon": forecast_horizon
+    }
+
+def _clean_coordinates_for_concat(data_array, reference_array):
+    """
+    Clean coordinates to ensure compatibility for concatenation.
+    Removes coordinates that don't exist in the reference array.
+    
+    Args:
+        data_array: xarray DataArray to clean
+        reference_array: Reference xarray DataArray for coordinate matching
+    
+    Returns:
+        xarray DataArray with cleaned coordinates
+    """
+    coords_to_remove = []
+    for coord_name in data_array.coords:
+        if coord_name not in reference_array.coords:
+            coords_to_remove.append(coord_name)
+    
+    if coords_to_remove:
+        return data_array.drop_vars(coords_to_remove)
+    else:
+        return data_array
+
+def train_and_predict_idw_spatiotemporal_cv(file_path, target_variable, power=2.0, min_neighbors=5, max_neighbors=20, 
+                                          forecast_horizon=24, spatial_folds=5, temporal_folds=5, 
+                                          cv_method='blocked', buffer_distance=0.5):
+    """
+    Perform spatial prediction using IDW with spatio-temporal cross-validation.
+    This provides the most rigorous validation by holding out both spatial regions and temporal periods.
+    
+    Args:
+        file_path: Path to the spatial NetCDF file
+        target_variable: Variable to predict
+        power: IDW power parameter
+        min_neighbors: Minimum number of neighbors for interpolation
+        max_neighbors: Maximum number of neighbors for interpolation
+        forecast_horizon: Number of future time steps to forecast
+        spatial_folds: Number of spatial folds for cross-validation
+        temporal_folds: Number of temporal folds for cross-validation
+        cv_method: 'blocked' for contiguous regions/periods, 'random' for scattered
+        buffer_distance: Spatial buffer around test regions (degrees)
+    
+    Returns:
+        dict: Results with spatiotemporal validation metrics
+    """
+    import scipy.spatial.distance as distance
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    from sklearn.model_selection import KFold
+    
+    # Load spatial data
+    with xr.open_dataset(file_path) as ds:
+        data_array = ds[target_variable]
+        
+        # Clean up any problematic coordinates (like 'expver') early
+        problematic_coords = ['expver', 'number']  # Common ERA5 coords that cause issues
+        coords_to_drop = [coord for coord in problematic_coords if coord in data_array.coords]
+        if coords_to_drop:
+            data_array = data_array.drop_vars(coords_to_drop)
+        
+        # Get coordinate names
+        lat_name, lon_name = _get_spatial_coord_names(ds)
+        if lat_name is None or lon_name is None:
+            raise ValueError(f"Spatial data must have latitude/longitude dimensions. Found: {list(ds.dims)}")
+        
+        # Check spatial dimensions
+        lat_size = len(ds[lat_name])
+        lon_size = len(ds[lon_name])
+        if lat_size == 1 and lon_size == 1:
+            raise ValueError("This appears to be single-point data, not spatial data.")
+        
+        # Get coordinates and time
+        lats = ds[lat_name].values
+        lons = ds[lon_name].values
+        time_dim = get_time_dim_name(ds)
+        
+        if not time_dim or len(ds[time_dim]) < temporal_folds:
+            raise ValueError(f"Need at least {temporal_folds} time steps for temporal cross-validation")
+        
+        n_times = len(ds[time_dim])
+        times_available = ds[time_dim].values
+        
+        # Create coordinate mesh
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+        coords = np.column_stack([lat_grid.flatten(), lon_grid.flatten()])
+        
+        # Generate spatio-temporal CV folds
+        def create_spatial_folds(lats, lons, n_folds, method='blocked', buffer_dist=0.5):
+            """Create spatial cross-validation folds"""
+            if method == 'blocked':
+                # Create contiguous spatial blocks
+                lat_edges = np.linspace(lats.min(), lats.max(), int(np.sqrt(n_folds)) + 1)
+                lon_edges = np.linspace(lons.min(), lons.max(), int(np.ceil(n_folds / np.sqrt(n_folds))) + 1)
+                
+                folds = []
+                fold_id = 0
+                for i in range(len(lat_edges) - 1):
+                    for j in range(len(lon_edges) - 1):
+                        if fold_id >= n_folds:
+                            break
+                        
+                        # Test region
+                        test_mask = ((lat_grid >= lat_edges[i]) & (lat_grid < lat_edges[i + 1]) &
+                                   (lon_grid >= lon_edges[j]) & (lon_grid < lon_edges[j + 1]))
+                        
+                        # Buffer region (exclude from training)
+                        buffer_mask = ((lat_grid >= lat_edges[i] - buffer_dist) & 
+                                     (lat_grid < lat_edges[i + 1] + buffer_dist) &
+                                     (lon_grid >= lon_edges[j] - buffer_dist) & 
+                                     (lon_grid < lon_edges[j + 1] + buffer_dist))
+                        
+                        train_mask = ~buffer_mask
+                        
+                        folds.append({
+                            'train_mask': train_mask.flatten(),
+                            'test_mask': test_mask.flatten(),
+                            'fold_id': fold_id
+                        })
+                        fold_id += 1
+                        
+            else:  # random
+                # Randomly assign grid points to folds
+                n_points = len(coords)
+                point_indices = np.arange(n_points)
+                np.random.shuffle(point_indices)
+                
+                folds = []
+                points_per_fold = n_points // n_folds
+                
+                for fold_id in range(n_folds):
+                    start_idx = fold_id * points_per_fold
+                    end_idx = (fold_id + 1) * points_per_fold if fold_id < n_folds - 1 else n_points
+                    
+                    test_indices = point_indices[start_idx:end_idx]
+                    train_indices = np.setdiff1d(point_indices, test_indices)
+                    
+                    test_mask = np.zeros(n_points, dtype=bool)
+                    train_mask = np.zeros(n_points, dtype=bool)
+                    test_mask[test_indices] = True
+                    train_mask[train_indices] = True
+                    
+                    folds.append({
+                        'train_mask': train_mask,
+                        'test_mask': test_mask,
+                        'fold_id': fold_id
+                    })
+            
+            return folds
+        
+        def create_temporal_folds(n_times, n_folds, method='blocked'):
+            """Create temporal cross-validation folds"""
+            if method == 'blocked':
+                # Create contiguous temporal blocks
+                times_per_fold = n_times // n_folds
+                folds = []
+                
+                for fold_id in range(n_folds):
+                    start_idx = fold_id * times_per_fold
+                    end_idx = (fold_id + 1) * times_per_fold if fold_id < n_folds - 1 else n_times
+                    
+                    test_indices = np.arange(start_idx, end_idx)
+                    train_indices = np.setdiff1d(np.arange(n_times), test_indices)
+                    
+                    folds.append({
+                        'train_indices': train_indices,
+                        'test_indices': test_indices,
+                        'fold_id': fold_id
+                    })
+            else:  # random
+                # Random temporal assignment
+                kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                folds = []
+                
+                for fold_id, (train_indices, test_indices) in enumerate(kfold.split(np.arange(n_times))):
+                    folds.append({
+                        'train_indices': train_indices,
+                        'test_indices': test_indices,
+                        'fold_id': fold_id
+                    })
+            
+            return folds
+        
+        # Create spatial and temporal folds
+        spatial_folds_data = create_spatial_folds(lats, lons, spatial_folds, cv_method, buffer_distance)
+        temporal_folds_data = create_temporal_folds(n_times, temporal_folds, cv_method)
+        
+        # Perform spatio-temporal cross-validation
+        cv_results = []
+        all_predictions = np.full_like(data_array.values, np.nan)
+        validation_mask = np.zeros_like(data_array.values, dtype=bool)
+        
+        for spatial_fold in spatial_folds_data:
+            for temporal_fold in temporal_folds_data:
+                # Get train/test indices for this fold combination
+                spatial_train_mask = spatial_fold['train_mask']
+                spatial_test_mask = spatial_fold['test_mask']
+                temporal_train_indices = temporal_fold['train_indices']
+                temporal_test_indices = temporal_fold['test_indices']
+                
+                fold_predictions = []
+                fold_actuals = []
+                
+                # For each test time step, train on spatial training data from training times
+                for test_t_idx in temporal_test_indices:
+                    test_time_slice = data_array.isel({time_dim: test_t_idx})
+                    
+                    # Collect training data from training time steps and training spatial locations
+                    train_coords_list = []
+                    train_values_list = []
+                    
+                    for train_t_idx in temporal_train_indices:
+                        train_time_slice = data_array.isel({time_dim: train_t_idx})
+                        train_values_flat = train_time_slice.values.flatten()
+                        
+                        # Use only spatial training locations
+                        valid_train_mask = spatial_train_mask & ~np.isnan(train_values_flat)
+                        
+                        if np.sum(valid_train_mask) > 0:
+                            train_coords_list.append(coords[valid_train_mask])
+                            train_values_list.append(train_values_flat[valid_train_mask])
+                    
+                    if len(train_coords_list) == 0:
+                        continue
+                    
+                    # Combine all training data
+                    all_train_coords = np.vstack(train_coords_list)
+                    all_train_values = np.concatenate(train_values_list)
+                    
+                    # Predict at test spatial locations
+                    test_coords = coords[spatial_test_mask]
+                    test_actual = test_time_slice.values.flatten()[spatial_test_mask]
+                    
+                    valid_test_mask = ~np.isnan(test_actual)
+                    if np.sum(valid_test_mask) == 0:
+                        continue
+                    
+                    test_coords_valid = test_coords[valid_test_mask]
+                    test_actual_valid = test_actual[valid_test_mask]
+                    
+                    # IDW prediction
+                    test_predicted = []
+                    for target_coord in test_coords_valid:
+                        # Calculate distances to all training points
+                        distances = distance.cdist([target_coord], all_train_coords)[0]
+                        
+                        # Select nearest neighbors
+                        nearest_indices = np.argsort(distances)[:max_neighbors]
+                        nearest_distances = distances[nearest_indices]
+                        nearest_values = all_train_values[nearest_indices]
+                        
+                        # Handle exact matches
+                        if nearest_distances[0] == 0:
+                            predicted_value = nearest_values[0]
+                        else:
+                            # Calculate IDW weights
+                            weights = 1.0 / (nearest_distances ** power)
+                            predicted_value = np.average(nearest_values, weights=weights)
+                        
+                        test_predicted.append(predicted_value)
+                    
+                    test_predicted = np.array(test_predicted)
+                    
+                    # Store results for this fold
+                    fold_predictions.extend(test_predicted)
+                    fold_actuals.extend(test_actual_valid)
+                    
+                    # Store in full prediction array
+                    test_flat_indices = np.where(spatial_test_mask)[0][valid_test_mask]
+                    for i, pred_val in enumerate(test_predicted):
+                        flat_idx = test_flat_indices[i]
+                        lat_idx, lon_idx = np.unravel_index(flat_idx, (len(lats), len(lons)))
+                        all_predictions[test_t_idx, lat_idx, lon_idx] = pred_val
+                        validation_mask[test_t_idx, lat_idx, lon_idx] = True
+                
+                # Calculate metrics for this fold combination
+                if len(fold_predictions) > 0:
+                    fold_rmse = np.sqrt(mean_squared_error(fold_actuals, fold_predictions))
+                    fold_mae = mean_absolute_error(fold_actuals, fold_predictions)
+                    fold_r2 = r2_score(fold_actuals, fold_predictions)
+                    
+                    cv_results.append({
+                        'spatial_fold': spatial_fold['fold_id'],
+                        'temporal_fold': temporal_fold['fold_id'],
+                        'rmse': fold_rmse,
+                        'mae': fold_mae,
+                        'r2': fold_r2,
+                        'n_predictions': len(fold_predictions)
+                    })
+        
+        # Calculate overall cross-validation metrics
+        if cv_results:
+            cv_rmse = np.mean([r['rmse'] for r in cv_results])
+            cv_mae = np.mean([r['mae'] for r in cv_results])
+            cv_r2 = np.mean([r['r2'] for r in cv_results])
+            cv_std_rmse = np.std([r['rmse'] for r in cv_results])
+            cv_std_mae = np.std([r['mae'] for r in cv_results])
+            cv_std_r2 = np.std([r['r2'] for r in cv_results])
+        else:
+            cv_rmse = cv_mae = cv_r2 = np.nan
+            cv_std_rmse = cv_std_mae = cv_std_r2 = np.nan
+        
+        # Create prediction arrays with proper coordinates
+        predicted_all_times = xr.DataArray(
+            all_predictions,
+            dims=data_array.dims,
+            coords=data_array.coords
+        )
+        
+        # Generate future forecasts using simple temporal extrapolation
+        time_step_seconds = pd.to_datetime(times_available).to_series().diff().dt.total_seconds().median()
+        if pd.isna(time_step_seconds) or time_step_seconds == 0:
+            time_step_seconds = 3600
+        
+        last_time = pd.to_datetime(times_available[-1])
+        future_times = [last_time + pd.to_timedelta(i * time_step_seconds, unit='s') 
+                       for i in range(1, forecast_horizon + 1)]
+        
+        # Simple future prediction using trend from last few time steps
+        n_trend_steps = min(5, n_times)
+        last_slices = data_array.isel({time_dim: slice(-n_trend_steps, None)})
+        
+        future_predictions = []
+        for i in range(forecast_horizon):
+            # Simple linear extrapolation
+            if n_trend_steps >= 2:
+                trend = (last_slices.isel({time_dim: -1}) - last_slices.isel({time_dim: -2}))
+                future_slice = last_slices.isel({time_dim: -1}) + trend * (i + 1)
+            else:
+                future_slice = last_slices.isel({time_dim: -1})
+            
+            future_predictions.append(future_slice)
+        
+        if future_predictions:
+            # Create future coordinates, ensuring compatibility with original data
+            future_coords = {}
+            for dim in data_array.dims:
+                if dim == time_dim:
+                    future_coords[dim] = future_times
+                else:
+                    future_coords[dim] = data_array.coords[dim]
+            
+            # Only include coordinates that exist in the original data_array
+            # This prevents issues with mismatched coordinates like 'expver'
+            filtered_future_coords = {
+                coord_name: coord_val for coord_name, coord_val in future_coords.items()
+                if coord_name in data_array.coords
+            }
+            
+            future_array = xr.concat(future_predictions, dim=time_dim, coords='minimal').assign_coords(**filtered_future_coords)
+            predicted_extended = xr.concat([predicted_all_times, future_array], dim=time_dim, coords='minimal')
+            
+            # Extend actual data with NaN for future
+            nan_shape = list(data_array.shape)
+            nan_shape[data_array.get_axis_num(time_dim)] = forecast_horizon
+            
+            # Create future NaN array with only coordinates that exist in original data
+            future_nan_coords = {}
+            for dim in data_array.dims:
+                if dim == time_dim:
+                    future_nan_coords[dim] = future_times
+                else:
+                    future_nan_coords[dim] = data_array.coords[dim]
+            
+            future_nan = xr.DataArray(
+                np.full(nan_shape, np.nan),
+                dims=data_array.dims,
+                coords=future_nan_coords
+            )
+            
+            # Before concatenating, ensure coordinate compatibility
+            # Remove any coordinates from future_nan that don't exist in data_array
+            coords_to_remove = []
+            for coord_name in future_nan.coords:
+                if coord_name not in data_array.coords:
+                    coords_to_remove.append(coord_name)
+            
+            if coords_to_remove:
+                future_nan = future_nan.drop_vars(coords_to_remove)
+            
+            actual_extended = xr.concat([data_array, future_nan], dim=time_dim, coords='minimal')
+            
+            all_times = list(times_available) + future_times
+        else:
+            predicted_extended = predicted_all_times
+            actual_extended = data_array
+            all_times = list(times_available)
+        
+        return {
+            'actual_spatial_all_times': actual_extended,
+            'predicted_spatial_all_times': predicted_extended,
+            'rmse': cv_rmse,
+            'mae': cv_mae,
+            'r2': cv_r2,
+            'cv_std_rmse': cv_std_rmse,
+            'cv_std_mae': cv_std_mae,
+            'cv_std_r2': cv_std_r2,
+            'cv_results': cv_results,
+            'target_variable': target_variable,
+            'model_name': 'InverseDistanceWeighting_SpatioTemporalCV',
+            'time_dim': time_dim,
+            'n_times': len(all_times),
+            'n_actual_times': n_times,
+            'forecast_horizon': forecast_horizon,
+            'times_available': all_times,
+            'validation_method': 'spatiotemporal_cv',
+            'validation_coverage': float(np.sum(validation_mask)) / validation_mask.size,
+            'hyperparameters': {
+                'power': power,
+                'min_neighbors': min_neighbors,
+                'max_neighbors': max_neighbors,
+                'spatial_folds': spatial_folds,
+                'temporal_folds': temporal_folds,
+                'cv_method': cv_method,
+                'buffer_distance': buffer_distance
+            }
+        }
+
+def _get_spatial_coord_names(dataset):
+    """
+    Get the correct latitude and longitude coordinate names from a spatial dataset.
+    
+    Args:
+        dataset: xarray Dataset or DataArray
+        
+    Returns:
+        tuple: (lat_name, lon_name) or (None, None) if not found
+    """
+    lat_names = ['lat', 'latitude', 'y']
+    lon_names = ['lon', 'longitude', 'x']
+    
+    lat_name = None
+    lon_name = None
+    
+    # Check dimensions first
+    for name in lat_names:
+        if name in dataset.dims:
+            lat_name = name
+            break
+    
+    for name in lon_names:
+        if name in dataset.dims:
+            lon_name = name
+            break
+    
+    # If not found in dims, check coordinates
+    if lat_name is None:
+        for name in lat_names:
+            if name in dataset.coords:
+                lat_name = name
+                break
+    
+    if lon_name is None:
+        for name in lon_names:
+            if name in dataset.coords:
+                lon_name = name
+                break
+    
+    return lat_name, lon_name
+
+def _generate_seasonal_forecast(data_array, current_time, times_available, future_steps):
+    """
+    Generate forecast using seasonal/cyclical patterns from historical data.
+    
+    Args:
+        data_array: The full historical data array
+        current_time: The future time to forecast for
+        times_available: Array of historical times
+        future_steps: Number of steps into the future
+    
+    Returns:
+        Forecasted spatial data for the given time
+    """
+    import pandas as pd
+    
+    # Convert times to pandas datetime for easier manipulation
+    hist_times = pd.to_datetime(times_available)
+    forecast_time = pd.to_datetime(current_time)
+    
+    # Find similar times in history (same hour of day, similar day of year)
+    hist_hours = hist_times.hour
+    hist_dayofyear = hist_times.dayofyear
+    
+    target_hour = forecast_time.hour
+    target_dayofyear = forecast_time.dayofyear
+    
+    # Find times with same hour
+    hour_mask = hist_hours == target_hour
+    
+    if hour_mask.sum() > 0:
+        # Find the closest day of year match within the same hour
+        dayofyear_diff = np.abs(hist_dayofyear[hour_mask] - target_dayofyear)
+        best_match_idx = np.where(hour_mask)[0][np.argmin(dayofyear_diff)]
+        
+        # Use the best historical match as the forecast
+        forecast_slice = data_array.isel({data_array.dims[0]: best_match_idx})
+        
+        # Add some damping for future steps (gradually return to mean)
+        if future_steps > 1:
+            last_slice = data_array.isel({data_array.dims[0]: -1})
+            damping_factor = min(0.9 ** (future_steps - 1), 0.5)  # Decay factor
+            forecast_slice = damping_factor * forecast_slice + (1 - damping_factor) * last_slice
+            
+        return forecast_slice
+    else:
+        # Fallback to simpler method if no hour match found
+        return _generate_damped_trend_forecast(data_array, future_steps)
+
+def _generate_damped_trend_forecast(data_array, future_steps):
+    """
+    Generate forecast using a damped trend approach.
+    
+    Args:
+        data_array: The historical data array
+        future_steps: Number of steps into the future
+    
+    Returns:
+        Forecasted spatial data
+    """
+    time_dim = data_array.dims[0]
+    n_times = data_array.shape[0]
+    
+    if n_times >= 3:
+        # Use last 3 points to estimate trend and seasonality
+        recent_data = data_array.isel({time_dim: slice(-3, None)})
+        
+        # Calculate a smoothed trend
+        weights = np.array([0.2, 0.3, 0.5])  # Give more weight to recent data
+        weighted_diff = np.zeros_like(recent_data.isel({time_dim: 0}).values)
+        
+        for i in range(1, 3):
+            diff = recent_data.isel({time_dim: i}).values - recent_data.isel({time_dim: i-1}).values
+            weighted_diff += weights[i] * diff
+        
+        # Apply damped trend
+        last_slice = data_array.isel({time_dim: -1})
+        damping_factor = 0.7 ** future_steps  # Exponential decay
+        
+        forecast_values = last_slice.values + damping_factor * weighted_diff
+        
+        # Create forecast slice with same structure as input
+        forecast_slice = last_slice.copy()
+        forecast_slice.values = forecast_values
+        
+        return forecast_slice
+    else:
+        # Not enough data, use persistence
+        return _generate_persistence_forecast(data_array.isel({time_dim: -1}), future_steps)
+
+def _generate_persistence_forecast(last_slice, future_steps):
+    """
+    Generate forecast using persistence (last value) with small cyclical variation.
+    
+    Args:
+        last_slice: The last known spatial data slice
+        future_steps: Number of steps into the future
+    
+    Returns:
+        Forecasted spatial data
+    """
+    forecast_slice = last_slice.copy()
+    
+    # Add small cyclical variation to avoid completely flat forecasts
+    # Use a sine wave to simulate daily temperature cycles
+    phase = (future_steps * 2 * np.pi) / 24  # Assume 24 time steps per day
+    amplitude = 0.02  # Small amplitude (2% of the mean value)
+    
+    # Calculate mean value for scaling
+    mean_val = np.nanmean(last_slice.values)
+    if np.isnan(mean_val) or mean_val == 0:
+        mean_val = 1.0  # Fallback
+    
+    # Apply cyclical variation
+    cyclical_factor = 1 + amplitude * np.sin(phase)
+    forecast_slice.values = forecast_slice.values * cyclical_factor
+    
+    return forecast_slice

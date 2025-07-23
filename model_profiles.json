@@ -1,0 +1,47 @@
+{
+    "RandomForestRegressor": {
+        "0.898 R^2": {
+            "n_estimators_rf": 100,
+            "max_depth_rf": 10,
+            "min_samples_split_rf": 3,
+            "min_samples_leaf_rf": 2,
+            "criterion_rf": "squared_error",
+            "max_features_rf": "sqrt",
+            "bootstrap_rf": true,
+            "oob_score_rf": false
+        },
+        "AutoTune_RandomForestRegressor_20250622_1041": {
+            "n_estimators_rf": 205,
+            "max_depth_rf": 19,
+            "min_samples_split_rf": 20,
+            "min_samples_leaf_rf": 8,
+            "max_features_rf": "sqrt",
+            "criterion_rf": "squared_error",
+            "bootstrap_rf": true,
+            "oob_score_rf": true
+        }
+    },
+    "GradientBoostingRegressor": {
+        "0.91 R^2": {
+            "n_estimators_gbr": 240,
+            "max_depth_gbr": 2,
+            "min_samples_split_gbr": 2,
+            "min_samples_leaf_gbr": 1,
+            "learning_rate_gbr": 0.22,
+            "subsample_gbr": 0.6,
+            "loss_gbr": "absolute_error"
+        },
+        "AutoTune_GradientBoostingRegressor_20250622_1045": {
+            "n_estimators_gbr": 77,
+            "max_depth_gbr": 2,
+            "min_samples_split_gbr": 11,
+            "min_samples_leaf_gbr": 3,
+            "learning_rate_gbr": 0.19230446963127193,
+            "subsample_gbr": 0.7977311875654753,
+            "loss_gbr": "huber"
+        }
+    },
+    "Gaussian Process (Spatial)": {
+        "0.913 R^2": {}
+    }
+}
